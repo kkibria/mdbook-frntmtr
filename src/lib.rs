@@ -1,7 +1,9 @@
 use std::collections::HashMap;
-use mdbook::book::{Book, BookItem};
-use mdbook::errors::{Result};
-use mdbook::preprocess::{Preprocessor, PreprocessorContext};
+
+use mdbook_preprocessor::book::{Book, BookItem};
+use mdbook_preprocessor::errors::Result;
+use mdbook_preprocessor::{Preprocessor, PreprocessorContext};
+
 use regex::Regex;
 
 pub struct Frntmtr;
@@ -18,55 +20,52 @@ impl Preprocessor for Frntmtr {
     }
 
     fn run(&self, _ctx: &PreprocessorContext, mut book: Book) -> Result<Book> {
-        let res = None;
-        book.for_each_mut(|item: &mut BookItem| {
-            if let Some(Err(_)) = res {
-                return;
-            }
+        // A delimiter line that is exactly '---' with optional whitespace, in multiline mode.
+        let delim_re = Regex::new(r"(?m)^---\s*$").unwrap();
 
+        book.for_each_mut(|item: &mut BookItem| {
             if let BookItem::Chapter(ref mut chapter) = *item {
                 let content = chapter.content.clone();
+
+                // Split into: [before, frontmatter, after]
+                let parts: Vec<&str> = delim_re.splitn(content.as_str(), 3).collect();
+                if parts.len() != 3 {
+                    return;
+                }
+
+                // Parse frontmatter lines: "key: value"
                 let mut meta: HashMap<&str, &str> = HashMap::new();
- 
-                // we need to use multiline mode
-                let re = Regex::new(r"(?m)^---[\s]*$").unwrap();
-                let p: Vec<&str> = re.splitn(content.as_str(), 3).collect();
-                if p.len() == 3 {
-                    for line in p[1].split('\n') {
-                        let parts = line.splitn(2, ':').collect::<Vec<&str>>();
-                        if parts.len() == 2 {
-                            meta.insert(parts[0].trim(), parts[1].trim());
-                        }
+                for line in parts[1].lines() {
+                    let kv: Vec<&str> = line.splitn(2, ':').collect();
+                    if kv.len() == 2 {
+                        meta.insert(kv[0].trim(), kv[1].trim());
                     }
-                    // update contents
-                    chapter.content = String::from(p[2]);
-                    for (key, val) in meta.iter() {
-                        let mut keyvar: String = r"\{\{[ ]*page.".to_owned();
-                        keyvar.push_str(key);
-                        keyvar.push_str(r"[ ]*\}\}");
-                        let re = Regex::new(keyvar.as_str()).unwrap();
-                        chapter.content = re.replace_all(chapter.content.as_str(), *val).to_string();    
+                }
 
-                        // chapter.content = chapter.content.replace(&keyvar.as_str(), val);
-                    }
+                // Replace chapter contents with body (after frontmatter)
+                chapter.content = parts[2].to_string();
 
+                // Replace placeholders like: {{ page.title }}
+                for (key, val) in meta.iter() {
+                    let mut pat = r"\{\{\s*page\.".to_owned();
+                    pat.push_str(&regex::escape(key));
+                    pat.push_str(r"\s*\}\}");
 
-                    // let re = Regex::new(r"word").unwrap();
-                    // re.replace_all(&str, "****").to_string()
+                    let re = Regex::new(&pat).unwrap();
+                    chapter.content = re.replace_all(&chapter.content, *val).to_string();
+                }
 
-
-                    // update Title
-                    if let Some(title)= meta.get("title") {
-                        chapter.name = String::from(*title);
-                    }
+                // Update Title if present
+                if let Some(title) = meta.get("title") {
+                    chapter.name = (*title).to_string();
                 }
             }
         });
 
-        res.unwrap_or(Ok(())).map(|_| book)
+        Ok(book)
     }
 
-    fn supports_renderer(&self, renderer: &str) -> bool {
-        renderer != "unknown"
+    fn supports_renderer(&self, renderer: &str) -> Result<bool> {
+        Ok(renderer == "html")
     }
 }
