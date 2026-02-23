@@ -15,14 +15,20 @@ pub fn watch(folder: PathBuf, engine: TemplateEngine) -> notify::Result<()> {
 
     loop {
         match rx.recv_timeout(Duration::from_millis(300)) {
-            Ok(Event { paths, .. }) => {
+            Ok(Ok(Event { paths, .. })) => {
                 for path in paths {
                     if path.extension().map(|x| x == "md").unwrap_or(false) {
                         let _ = process_markdown(&path, &engine);
                     }
                 }
             }
-            Err(_) => {}
+            Ok(Err(e)) => {
+                eprintln!("watch error: {e}");
+            }
+            Err(_) => {
+                // timeout
+            }
         }
     }
+
 }

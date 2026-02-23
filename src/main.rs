@@ -2,33 +2,31 @@ use clap::{Arg, Command};
 use mdbook_preprocessor::errors::{Error, Result};
 use mdbook_preprocessor::parse_input;
 use mdbook_preprocessor::Preprocessor;
-use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process;
-use walkdir::WalkDir;
-
-use minijinja::{Environment, context};
 
 use mdbook_frntmtr::Frntmtr;
+
+mod config;
+mod fix;
+mod watcher;
 
 fn make_app() -> Command {
     Command::new("mdbook-frntmtr")
         .about("mdBook frontmatter preprocessor + utilities")
         .subcommand(
             Command::new("supports")
+                .about("Check whether a renderer is supported by this preprocessor")
                 .arg(Arg::new("renderer").required(true)),
         )
         .subcommand(
-            Command::new("fix")
-                .about("Inject frontmatter into markdown files")
-                .arg(Arg::new("folder").required(true))
-                .arg(
-                    Arg::new("template")
-                        .long("template")
-                        .required(true)
-                        .value_name("FILE"),
-                ),
+            Command::new("serve")
+                .about("Run mdbook serve + watch book.src to auto-inject frontmatter")
+                // Everything after `--` goes to mdbook:
+                // mdbook-frntmtr serve -- --open -p 3000
+                .trailing_var_arg(true)
+                .arg(Arg::new("mdbook_args").num_args(0..).last(true)),
         )
 }
 
@@ -37,16 +35,15 @@ fn main() {
     let preprocessor = Frntmtr::new();
 
     match matches.subcommand() {
-        Some(("supports", sub)) => {
-            let renderer = sub.get_one::<String>("renderer").unwrap();
-            let ok = preprocessor.supports_renderer(renderer).unwrap_or(false);
-            process::exit(if ok { 0 } else { 1 });
-        }
+        Some(("supports", sub)) => handle_supports(&preprocessor, sub),
 
-        Some(("fix", sub)) => {
-            let folder = sub.get_one::<String>("folder").unwrap();
-            let template_path = sub.get_one::<String>("template").unwrap();
-            if let Err(e) = handle_fix(folder, template_path) {
+        Some(("serve", sub)) => {
+            let mdbook_args: Vec<String> = sub
+                .get_many::<String>("mdbook_args")
+                .map(|vals| vals.map(|s| s.to_string()).collect())
+                .unwrap_or_else(Vec::new);
+
+            if let Err(e) = run_serve(mdbook_args) {
                 eprintln!("{e}");
                 process::exit(1);
             }
@@ -61,97 +58,16 @@ fn main() {
     }
 }
 
-fn handle_fix(folder: &str, template_path: &str) -> Result<()> {
-    let template_path = PathBuf::from(template_path);
-    let (env, template_name) = load_template_env(&template_path)?;
-
-    for entry in WalkDir::new(folder)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
-    {
-        process_markdown(entry.path(), &env, &template_name)?;
-    }
-
-    Ok(())
-}
-
-fn load_template_env(template_path: &Path) -> Result<(Environment<'static>, String)> {
-    let mut env = Environment::new();
-
-    let dir = template_path
-        .parent()
-        .ok_or_else(|| Error::msg("Template path has no parent directory"))?
-        .to_path_buf();
-
-    env.set_loader(minijinja::path_loader(dir));
-
-    let name = template_path
-        .file_name()
-        .ok_or_else(|| Error::msg("Template path has no file name"))?
-        .to_string_lossy()
-        .to_string();
-
-    Ok((env, name))
-}
-
-fn process_markdown(
-    path: &Path,
-    env: &Environment<'static>,
-    template_name: &str,
-) -> Result<()> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| Error::msg(format!("Read error {}: {e}", path.display())))?;
-
-    let mut first_non_empty = None;
-    let mut index = 0;
-
-    for (i, line) in content.lines().enumerate() {
-        if !line.trim().is_empty() {
-            first_non_empty = Some(line.trim().to_string());
-            index = i;
-            break;
+fn handle_supports(pre: &dyn Preprocessor, sub: &clap::ArgMatches) -> ! {
+    let renderer = sub.get_one::<String>("renderer").expect("Required argument");
+    let supported = match pre.supports_renderer(renderer) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
         }
-    }
-
-    let heading = match first_non_empty {
-        Some(h) => h,
-        None => return Ok(()),
     };
-
-    if heading.contains("---") {
-        return Ok(());
-    }
-
-    let title = heading.trim_start_matches('#').trim();
-
-    let tmpl = env
-        .get_template(template_name)
-        .map_err(|e| Error::msg(format!("Template load error: {e}")))?;
-
-    let rendered = tmpl
-        .render(context! {
-            title => title,
-            // page => { title => title },
-        })
-        .map_err(|e| Error::msg(format!("Template render error: {e}")))?;
-
-    let remaining: Vec<&str> = content.lines().skip(index + 1).collect();
-
-    let mut new_content = String::new();
-    new_content.push_str(&rendered);
-    new_content.push('\n');
-
-    if !remaining.is_empty() {
-        new_content.push_str(&remaining.join("\n"));
-    }
-
-    println!("adding frontmatter to {}", path.display());
-
-    fs::write(path, new_content)
-        .map_err(|e| Error::msg(format!("Write error {}: {e}", path.display())))?;
-
-    Ok(())
+    process::exit(if supported { 0 } else { 1 });
 }
 
 fn handle_preprocessing(pre: &dyn Preprocessor) -> Result<()> {
@@ -160,4 +76,53 @@ fn handle_preprocessing(pre: &dyn Preprocessor) -> Result<()> {
     serde_json::to_writer(io::stdout(), &processed)
         .map_err(|e| Error::msg(format!("Write JSON error: {e}")))?;
     Ok(())
+}
+
+fn run_serve(mdbook_args: Vec<String>) -> Result<()> {
+    let sc = config::load(Path::new("book.toml"))?;
+    let engine = fix::TemplateEngine::new(&sc.template_path)?;
+
+    {
+        let src_dir = sc.src_dir.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = watcher::watch(src_dir, engine) {
+                eprintln!("watcher error: {e}");
+            }
+        });
+    }
+
+    let mdbook = which::which("mdbook")
+        .map_err(|e| Error::msg(format!("Could not find `mdbook` on PATH: {e}")))?;
+
+    eprintln!("book_root: {}", sc.book_root.display());
+    eprintln!("book_root is_dir: {}", sc.book_root.is_dir());
+    eprintln!("src_dir: {}", sc.src_dir.display());
+    eprintln!("src_dir is_dir: {}", sc.src_dir.is_dir());
+    eprintln!("template_path: {}", sc.template_path.display());
+    eprintln!("template is_file: {}", sc.template_path.is_file());
+    eprintln!("mdbook path: {}", mdbook.display());
+    eprintln!("mdbook exists: {}", mdbook.exists());
+    eprintln!("mdbook args: {:?}", mdbook_args);
+
+    if !sc.book_root.is_dir() {
+        return Err(Error::msg(format!(
+            "book_root is not a directory: {}",
+            sc.book_root.display()
+        )));
+    }
+
+    let status = process::Command::new(&mdbook)
+        .current_dir(&sc.book_root)
+        .arg("serve")
+        .args(&mdbook_args)
+        .status()
+        .map_err(|e| {
+            Error::msg(format!(
+                "failed to start mdbook serve (cwd={} exe={}): {e}",
+                sc.book_root.display(),
+                mdbook.display()
+            ))
+        })?;
+
+    process::exit(status.code().unwrap_or(1));
 }

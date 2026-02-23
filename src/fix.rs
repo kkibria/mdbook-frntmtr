@@ -1,7 +1,7 @@
 use mdbook_preprocessor::errors::{Error, Result};
-use minijinja::{Environment, context};
+use minijinja::{context, Environment};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use walkdir::WalkDir;
 
 pub struct TemplateEngine {
@@ -40,7 +40,9 @@ impl TemplateEngine {
 
         tmpl.render(context! {
             title => title,
-            page => { title => title },
+            page => context! {
+                title => title
+            }
         })
         .map_err(|e| Error::msg(format!("Template render error: {e}")))
     }
@@ -50,8 +52,8 @@ pub fn process_markdown(path: &Path, engine: &TemplateEngine) -> Result<()> {
     let content = fs::read_to_string(path)
         .map_err(|e| Error::msg(format!("Read error {}: {e}", path.display())))?;
 
-    let mut first_non_empty = None;
-    let mut index = 0;
+    let mut first_non_empty: Option<String> = None;
+    let mut index: usize = 0;
 
     for (i, line) in content.lines().enumerate() {
         if !line.trim().is_empty() {
@@ -66,14 +68,18 @@ pub fn process_markdown(path: &Path, engine: &TemplateEngine) -> Result<()> {
         None => return Ok(()),
     };
 
-    if heading.contains("---") {
+    // Skip if file already begins with frontmatter delimiter as first non-empty line
+    if heading == "---" {
         return Ok(());
     }
 
     let title = heading.trim_start_matches('#').trim();
+    if title.is_empty() {
+        return Ok(());
+    }
 
+    // ✅ Use the engine you already wrote
     let rendered = engine.render(title)?;
-
     let remaining: Vec<&str> = content.lines().skip(index + 1).collect();
 
     let mut new_content = String::new();
@@ -92,6 +98,7 @@ pub fn process_markdown(path: &Path, engine: &TemplateEngine) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn process_tree(folder: &Path, engine: &TemplateEngine) -> Result<()> {
     for entry in WalkDir::new(folder)
         .into_iter()
