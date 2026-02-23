@@ -18,7 +18,9 @@ pub fn watch(folder: PathBuf, engine: TemplateEngine) -> notify::Result<()> {
             Ok(Ok(Event { paths, .. })) => {
                 for path in paths {
                     if path.extension().map(|x| x == "md").unwrap_or(false) {
-                        let _ = process_markdown(&path, &engine);
+                        if let Err(e) = process_markdown(&path, &engine) {
+                            eprintln!("process_markdown error ({}): {e}", path.display());
+                        }
                     }
                 }
             }

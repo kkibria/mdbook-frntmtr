@@ -69,7 +69,7 @@ pub fn process_markdown(path: &Path, engine: &TemplateEngine) -> Result<()> {
     };
 
     // Skip if file already begins with frontmatter delimiter as first non-empty line
-    if heading == "---" {
+    if heading.trim() == "---" {
         return Ok(());
     }
 
